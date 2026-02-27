@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AZ-Aware Routing Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .controls {
+            margin-bottom: 30px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin-right: 10px;
+            cursor: pointer;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .stat-box {
+            background: #f0f0f0;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #333;
+        }
+        .stat-label {
+            font-size: 14px;
+            color: #666;
+            margin-top: 5px;
+        }
+        #chart-container {
+            height: 400px;
+            margin-bottom: 10px;
+        }
+        .history-controls {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f0f0f0;
+            border-radius: 8px;
+        }
+        .slider-container {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        #historySlider {
+            flex: 1;
+            height: 6px;
+        }
+        .history-info {
+            min-width: 200px;
+            font-size: 14px;
+            color: #666;
+        }
+        #log {
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            background: #f9f9f9;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .match { color: green; }
+        .no-match { color: red; }
+    </style>
+</head>
+<body>
+    <h1>AZ-Aware Routing Test</h1>
+    
+    <div class="controls">
+        <button id="startBtn" onclick="startTest()">Start Test</button>
+        <button id="stopBtn" onclick="stopTest()" disabled>Stop Test</button>
+        <button onclick="resetTest()">Reset</button>
+    </div>
+
+    <div class="stats">
+        <div class="stat-box">
+            <div class="stat-value" id="totalRequests">0</div>
+            <div class="stat-label">Total Requests</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-value" id="matchedRequests">0</div>
+            <div class="stat-label">Same Zone</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-value" id="percentage">0%</div>
+            <div class="stat-label">Same Zone %</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-value" id="requestsPerSec">0</div>
+            <div class="stat-label">Requests/sec</div>
+        </div>
+    </div>
+
+    <div id="chart-container">
+        <canvas id="chart"></canvas>
+    </div>
+
+    <div class="history-controls">
+        <div class="slider-container">
+            <span>History:</span>
+            <input type="range" id="historySlider" min="0" max="0" value="0" disabled>
+            <span class="history-info" id="historyInfo">No history</span>
+        </div>
+    </div>
+
+    <h3>Request Log</h3>
+    <div id="log"></div>
+
+    <script>
+        let totalRequests = 0;
+        let matchedRequests = 0;
+        let isRunning = false;
+        let intervalId = null;
+        let startTime = null;
+        let chart = null;
+        let historySnapshots = [];
+        let currentHistoryIndex = -1;
+
+        // Initialize chart
+        const ctx = document.getElementById('chart').getContext('2d');
+        chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Same Zone Traffic %',
+                    data: [],
+                    borderColor: 'rgb(75, 192, 192)',
+                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                    tension: 0.1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        max: 100,
+                        title: {
+                            display: true,
+                            text: 'Percentage (%)'
+                        }
+                    },
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Requests'
+                        }
+                    }
+                }
+            }
+        });
+
+        async function makeRequest() {
+            try {
+                const response = await fetch('/api/', {
+                    headers: {
+                        'azAwareRouting': 'true'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                const azId = data.availabilityZoneId;
+                const upstreamAzId = data.upstreamAvailabilityZoneId;
+                const isMatch = azId === upstreamAzId;
+
+                totalRequests++;
+                if (isMatch) {
+                    matchedRequests++;
+                }
+
+                updateStats();
+                updateChart();
+                logRequest(totalRequests, azId, upstreamAzId, isMatch);
+
+            } catch (error) {
+                console.error('Request failed:', error);
+                const errorDetails = `${error.name}: ${error.message} | URL: /api/ | Time: ${new Date().toISOString()}`;
+                logError(errorDetails);
+                
+                if (error.message.includes('fetch')) {
+                    logError('Possible CORS issue - check browser console for details');
+                }
+            }
+        }
+
+        function updateStats() {
+            document.getElementById('totalRequests').textContent = totalRequests;
+            document.getElementById('matchedRequests').textContent = matchedRequests;
+            
+            const percentage = totalRequests > 0 ? ((matchedRequests / totalRequests) * 100).toFixed(2) : 0;
+            document.getElementById('percentage').textContent = percentage + '%';
+
+            if (startTime) {
+                const elapsed = (Date.now() - startTime) / 1000;
+                const rps = (totalRequests / elapsed).toFixed(2);
+                document.getElementById('requestsPerSec').textContent = rps;
+            }
+        }
+
+        function updateChart() {
+            const percentage = totalRequests > 0 ? ((matchedRequests / totalRequests) * 100).toFixed(2) : 0;
+            
+            chart.data.labels.push(totalRequests);
+            chart.data.datasets[0].data.push(percentage);
+
+            // Keep only last 100 points
+            if (chart.data.labels.length > 100) {
+                chart.data.labels.shift();
+                chart.data.datasets[0].data.shift();
+            }
+
+            chart.update('none');
+            
+            // Save snapshot every 10 requests
+            if (totalRequests % 10 === 0) {
+                saveSnapshot();
+            }
+        }
+
+        function saveSnapshot() {
+            historySnapshots.push({
+                timestamp: new Date().toISOString(),
+                totalRequests: totalRequests,
+                matchedRequests: matchedRequests,
+                labels: [...chart.data.labels],
+                data: [...chart.data.datasets[0].data]
+            });
+            
+            currentHistoryIndex = historySnapshots.length - 1;
+            updateHistorySlider();
+        }
+
+        function updateHistorySlider() {
+            const slider = document.getElementById('historySlider');
+            const info = document.getElementById('historyInfo');
+            
+            if (historySnapshots.length > 0) {
+                slider.max = historySnapshots.length - 1;
+                slider.value = currentHistoryIndex;
+                slider.disabled = false;
+                
+                const snapshot = historySnapshots[currentHistoryIndex];
+                const time = new Date(snapshot.timestamp).toLocaleTimeString();
+                info.textContent = `Snapshot ${currentHistoryIndex + 1}/${historySnapshots.length} - ${time} (${snapshot.totalRequests} requests)`;
+            } else {
+                slider.disabled = true;
+                info.textContent = 'No history';
+            }
+        }
+
+        document.getElementById('historySlider').addEventListener('input', function(e) {
+            currentHistoryIndex = parseInt(e.target.value);
+            const snapshot = historySnapshots[currentHistoryIndex];
+            
+            chart.data.labels = [...snapshot.labels];
+            chart.data.datasets[0].data = [...snapshot.data];
+            chart.update();
+            
+            const time = new Date(snapshot.timestamp).toLocaleTimeString();
+            document.getElementById('historyInfo').textContent = 
+                `Snapshot ${currentHistoryIndex + 1}/${historySnapshots.length} - ${time} (${snapshot.totalRequests} requests)`;
+        });
+
+        function logRequest(num, azId, upstreamAzId, isMatch) {
+            const log = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = isMatch ? 'match' : 'no-match';
+            entry.textContent = `Request ${num}: AZ=${azId}, Upstream=${upstreamAzId} - ${isMatch ? 'MATCH' : 'NO MATCH'}`;
+            log.appendChild(entry);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function logError(message) {
+            const log = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.style.color = 'orange';
+            entry.textContent = `ERROR: ${message}`;
+            log.appendChild(entry);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function startTest() {
+            if (isRunning) return;
+            
+            isRunning = true;
+            startTime = Date.now();
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = false;
+
+            // Make requests continuously
+            const makeRequestLoop = () => {
+                if (isRunning) {
+                    makeRequest();
+                }
+            };
+            
+            intervalId = setInterval(makeRequestLoop, 400); // 10 requests per second
+        }
+
+        function stopTest() {
+            if (!isRunning) return;
+            
+            isRunning = false;
+            if (intervalId) {
+                clearInterval(intervalId);
+                intervalId = null;
+            }
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            
+            console.log('Test stopped');
+        }
+
+        function resetTest() {
+            stopTest();
+            totalRequests = 0;
+            matchedRequests = 0;
+            startTime = null;
+            historySnapshots = [];
+            currentHistoryIndex = -1;
+            
+            chart.data.labels = [];
+            chart.data.datasets[0].data = [];
+            chart.update();
+            
+            document.getElementById('log').innerHTML = '';
+            updateStats();
+            updateHistorySlider();
+        }
+    </script>
+</body>
+</html>
