@@ -140,6 +140,8 @@ create_launch_template() {
     
     USER_DATA=$(cat <<'EOF'
 #!/bin/bash
+set -e
+
 echo ECS_CLUSTER=__CLUSTER_NAME__ >> /etc/ecs/ecs.config
 echo AWS_DEFAULT_REGION=__REGION__ >> /etc/ecs/ecs.config
 echo ECS_BACKEND_HOST=__ECS_ENDPOINT__ >> /etc/ecs/ecs.config
@@ -156,6 +158,9 @@ docker kill $(docker ps -q) 2>/dev/null || true
 docker rm $(docker ps -a -q) 2>/dev/null || true
 docker rmi --force $(docker images -a -q) 2>/dev/null || true
 systemctl start ecs
+
+# Wait for ECS agent to register
+sleep 30
 EOF
 )
     
@@ -177,10 +182,11 @@ EOF
             },
             \"SecurityGroupIds\": [\"$CLIENT_SG\", \"$SERVER_SG\"],
             \"MetadataOptions\": {
-                \"HttpTokens\": \"optional\",
+                \"HttpEndpoint\": \"enabled\",
+                \"HttpTokens\": \"required\",
                 \"HttpPutResponseHopLimit\": 2
             },
-            \"UserData\": \"$(echo "$USER_DATA" | base64 -w 0)\",
+            \"UserData\": \"$(echo "$USER_DATA" | base64 | tr -d '\n')\",
             \"TagSpecifications\": [{
                 \"ResourceType\": \"instance\",
                 \"Tags\": [{
