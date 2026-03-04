@@ -47,8 +47,9 @@ class ProxyHandler(SimpleHTTPRequestHandler):
             super().do_GET()
 
 if __name__ == '__main__':
-    server = HTTPServer(('localhost', 8080), ProxyHandler)
-    print(f'Server running at http://localhost:8080')
+    port = int(os.environ.get('PORT', 8080))
+    server = HTTPServer(('localhost', port), ProxyHandler)
+    print(f'Server running at http://localhost:{port}')
     print(f'Proxying to: {LB_DNS_NAME}')
-    print('Open http://localhost:8080/az-routing-test.html')
+    print(f'Open http://localhost:{port}/az-routing-test.html')
     server.serve_forever()

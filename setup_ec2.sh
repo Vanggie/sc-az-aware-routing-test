@@ -2,11 +2,15 @@
 set -e
 
 # Global variables
-REGION="us-west-2"
-CLUSTER_NAME="az-aware-bugbash-cluster-ec2"
-ECS_ENDPOINT="https://madison.us-west-2.amazonaws.com"
-TASK_COUNT="${TASK_COUNT:-6}"
-ENVOY_IMAGE="${ENVOY_IMAGE:-public.ecr.aws/appmesh/aws-appmesh-envoy:v1.34.12.1-prod}"
+export REGION="us-west-2"
+export CLUSTER_NAME="az-aware-bugbash-cluster-ec2"
+export LB_NAME="az-aware-routing-bugbash-ec2-lb"
+export NAMESPACE_NAME="az-aware-routing-bugbash-ec2-ns"
+export ASG_NAME="az-aware-ec2-asg"
+export ECS_ENDPOINT="https://madison.us-west-2.amazonaws.com"
+export TASK_COUNT="${TASK_COUNT:-6}"
+export ENVOY_IMAGE="${ENVOY_IMAGE:-public.ecr.aws/appmesh/aws-appmesh-envoy:v1.34.12.1-prod}"
+export WEB_SERVER_PORT="${WEB_SERVER_PORT:-9090}"
 
 setup_credentials() {
     local account_id=$1
@@ -108,7 +112,7 @@ create_ecs_cluster() {
     aws ecs --region $REGION --endpoint $ECS_ENDPOINT create-cluster \
         --cluster-name $CLUSTER_NAME \
         --service-connect-defaults '{
-            "namespace": "az-aware-routing-bugbash-ec2"
+            "namespace": "az-aware-routing-bugbash-ec2-ns"
         }'
     echo "ECS cluster created successfully"
 }
@@ -152,15 +156,7 @@ docker pull $ENVOY_IMAGE
 docker tag $ENVOY_IMAGE ecs-service-connect-agent:interface-v1
 docker image save ecs-service-connect-agent:interface-v1 -o ecs-service-connect-agent.interface-v1.tar
 cp ecs-service-connect-agent.interface-v1.tar /var/lib/ecs/deps/serviceconnect/
-systemctl stop ecs
-rm -rf /var/lib/ecs/data/*; rm -rf /var/log/ecs/*
-docker kill $(docker ps -q) 2>/dev/null || true
-docker rm $(docker ps -a -q) 2>/dev/null || true
-docker rmi --force $(docker images -a -q) 2>/dev/null || true
-systemctl start ecs
 
-# Wait for ECS agent to register
-sleep 30
 EOF
 )
     
@@ -204,7 +200,7 @@ EOF
 create_autoscaling_group() {
     # Check if ASG exists
     EXISTING_ASG=$(aws autoscaling --region $REGION describe-auto-scaling-groups \
-        --auto-scaling-group-names az-aware-ec2-asg \
+        --auto-scaling-group-names $ASG_NAME \
         --query "AutoScalingGroups[0].AutoScalingGroupName" \
         --output text 2>/dev/null || echo "")
     
@@ -214,7 +210,7 @@ create_autoscaling_group() {
     fi
     
     aws autoscaling --region $REGION create-auto-scaling-group \
-        --auto-scaling-group-name az-aware-ec2-asg \
+        --auto-scaling-group-name $ASG_NAME \
         --launch-template "LaunchTemplateId=$LT_ID" \
         --min-size 1 \
         --max-size 30 \
@@ -230,14 +226,14 @@ create_autoscaling_group() {
 setup_load_balancer() {
     # Check if ALB exists
     ALB_ARN=$(aws elbv2 --region $REGION describe-load-balancers \
-        --names az-aware-routing-bugbash-ec2 \
+        --names $LB_NAME \
         --query "LoadBalancers[0].LoadBalancerArn" \
         --output text 2>/dev/null || echo "")
     
     if [ -z "$ALB_ARN" ] || [ "$ALB_ARN" == "None" ]; then
         echo "Creating new load balancer..."
         ALB_ARN=$(aws elbv2 --region $REGION create-load-balancer \
-            --name az-aware-routing-bugbash-ec2 \
+            --name $LB_NAME \
             --subnets $SUBNET_1 $SUBNET_2 $SUBNET_3 \
             --security-groups $LB_SG \
             --query "LoadBalancers[0].LoadBalancerArn" \
@@ -248,14 +244,14 @@ setup_load_balancer() {
 
     # Check if target group exists
     TG_ARN=$(aws elbv2 --region $REGION describe-target-groups \
-        --names az-aware-routing-bugbash-ec2 \
+        --names $LB_NAME \
         --query "TargetGroups[0].TargetGroupArn" \
         --output text 2>/dev/null || echo "")
     
     if [ -z "$TG_ARN" ] || [ "$TG_ARN" == "None" ]; then
         echo "Creating new target group..."
         TG_ARN=$(aws elbv2 --region $REGION create-target-group \
-            --name az-aware-routing-bugbash-ec2 \
+            --name $LB_NAME \
             --protocol HTTP \
             --port 80 \
             --vpc-id $VPC_ID \
@@ -505,32 +501,44 @@ show_alb_dns() {
 }
 
 start_web_analyzer() {
+    ALB_ARN=$(aws elbv2 --region $REGION describe-load-balancers \
+        --names $LB_NAME \
+        --query "LoadBalancers[0].LoadBalancerArn" \
+        --output text 2>/dev/null || echo "")
+
+    ALB_BNS_NAME=$(aws elbv2 --region $REGION describe-load-balancers \
+        --load-balancer-arns $ALB_ARN \
+        --query "LoadBalancers[0].DNSName" \
+        --output text)
+    export ALB_BNS_NAME=$ALB_BNS_NAME  
+
+    echo $ALB_BNS_NAME      
     # Check if port 8080 is in use
-    if lsof -ti:8080 > /dev/null 2>&1; then
+    if lsof -ti:$WEB_SERVER_PORT > /dev/null 2>&1; then
         # Get the process name
-        PROCESS=$(lsof -ti:8080 | xargs ps -p | grep -v PID | awk '{print $4}')
+        PROCESS=$(lsof -ti:$WEB_SERVER_PORT | xargs ps -p | grep -v PID | awk '{print $4}')
     
         # Check if it's our proxy server
         if echo "$PROCESS" | grep -q "python"; then
             # Check if it's running our proxy script
-            echo "Killing existing proxy server on port 8080..."
-            lsof -ti:8080 | xargs kill -9
+            echo "Killing existing proxy server on port $WEB_SERVER_PORT..."
+            lsof -ti:$WEB_SERVER_PORT | xargs kill -9
             sleep 1
         else
             echo "ERROR: Port 8080 is occupied by: $PROCESS"
             exit 1
         fi
     fi
-    LB_DNS_NAME=$ALB_BNS_NAME python3 az-aware-testing-proxy-server.py &
+    PORT=$WEB_SERVER_PORT LB_DNS_NAME=$ALB_BNS_NAME python3 az-aware-testing-proxy-server.py &
     sleep 2
-    if open -a "Google Chrome" http://localhost:8080/az-routing-test.html 2>/dev/null; then
+    if open -a "Google Chrome" http://localhost:$WEB_SERVER_PORT/az-routing-test.html 2>/dev/null; then
         echo "Opened in Chrome"
-    elif open -a "Firefox" http://localhost:8080/az-routing-test.html 2>/dev/null; then
+    elif open -a "Firefox" http://localhost:$WEB_SERVER_PORT/az-routing-test.html 2>/dev/null; then
         echo "Opened in Firefox"
-    elif open -a "Safari" http://localhost:8080/az-routing-test.html 2>/dev/null; then
+    elif open -a "Safari" http://localhost:$WEB_SERVER_PORT/az-routing-test.html 2>/dev/null; then
         echo "Opened in Safari"
     else
-        echo "Could not open browser. Please navigate to http://localhost:8080/az-routing-test.html"
+        echo "Could not open browser. Please navigate to http://localhost:$WEB_SERVER_PORT/az-routing-test.html"
     fi
 }
 

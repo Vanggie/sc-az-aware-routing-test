@@ -171,7 +171,8 @@
             try {
                 const response = await fetch('/api/', {
                     headers: {
-                        'azAwareRouting': 'true'
+                        'azAwareRouting': 'true',
+                        'dataSize': '100'
                     }
                 });
                 
@@ -315,7 +316,7 @@
                 }
             };
             
-            intervalId = setInterval(makeRequestLoop, 400); // 10 requests per second
+            intervalId = setInterval(makeRequestLoop, 200); // 10 requests per second
         }
 
         function stopTest() {

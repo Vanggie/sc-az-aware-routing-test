@@ -1,9 +1,15 @@
 #!/bin/bash
 set -e
 
-REGION="us-west-2"
-CLUSTER_NAME="az-aware-bugbash-cluster-ec2"
-ECS_ENDPOINT="https://madison.us-west-2.amazonaws.com"
+export REGION="us-west-2"
+export CLUSTER_NAME="az-aware-bugbash-cluster-ec2"
+export LB_NAME="az-aware-routing-bugbash-ec2-lb"
+export NAMESPACE_NAME="az-aware-routing-bugbash-ec2-ns"
+export ASG_NAME="az-aware-ec2-asg"
+export ECS_ENDPOINT="https://madison.us-west-2.amazonaws.com"
+export TASK_COUNT="${TASK_COUNT:-6}"
+export ENVOY_IMAGE="${ENVOY_IMAGE:-public.ecr.aws/appmesh/aws-appmesh-envoy:v1.34.12.1-prod}"
+export WEB_SERVER_PORT="${WEB_SERVER_PORT:-9090}"
 
 setup_credentials() {
     local account_id=$1
@@ -43,7 +49,7 @@ delete_autoscaling_group() {
     echo "Deleting Auto Scaling Group..."
     
     aws autoscaling --region $REGION delete-auto-scaling-group \
-        --auto-scaling-group-name az-aware-ec2-asg \
+        --auto-scaling-group-name $ASG_NAME \
         --force-delete 2>/dev/null || true
     
     echo "Waiting for instances to terminate..."
@@ -65,7 +71,7 @@ delete_load_balancer() {
     echo "Deleting load balancer and target group..."
     
     ALB_ARN=$(aws elbv2 --region $REGION describe-load-balancers \
-        --names az-aware-routing-bugbash-ec2 \
+        --names $LB_NAME \
         --query "LoadBalancers[0].LoadBalancerArn" \
         --output text 2>/dev/null || echo "")
     
@@ -85,7 +91,7 @@ delete_load_balancer() {
     sleep 10
     
     TG_ARN=$(aws elbv2 --region $REGION describe-target-groups \
-        --names az-aware-routing-bugbash-ec2 \
+        --names $LB_NAME \
         --query "TargetGroups[0].TargetGroupArn" \
         --output text 2>/dev/null || echo "")
     
@@ -144,7 +150,7 @@ delete_security_groups() {
 
 stop_proxy() {
     echo "Stopping proxy server..."
-    lsof -ti:8080 | xargs kill -9 2>/dev/null || true
+    lsof -ti:$WEB_SERVER_PORT | xargs kill -9 2>/dev/null || true
     echo "Proxy server stopped"
 }
 
