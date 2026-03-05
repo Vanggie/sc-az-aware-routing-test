@@ -500,6 +500,38 @@ show_alb_dns() {
     echo $ALB_BNS_NAME    
 }
 
+check_cluster_status() {
+    echo "Checking cluster status..."
+    
+    while true; do
+        CONTAINER_INSTANCES=$(aws ecs --region $REGION --endpoint $ECS_ENDPOINT describe-clusters \
+            --clusters $CLUSTER_NAME \
+            --query "clusters[0].registeredContainerInstancesCount" \
+            --output text 2>/dev/null || echo "0")
+        
+        FE_TASKS=$(aws ecs --region $REGION --endpoint $ECS_ENDPOINT describe-services \
+            --cluster $CLUSTER_NAME \
+            --services az-aware-fe-service-ec2 \
+            --query "services[0].runningCount" \
+            --output text 2>/dev/null || echo "0")
+        
+        BACKEND_TASKS=$(aws ecs --region $REGION --endpoint $ECS_ENDPOINT describe-services \
+            --cluster $CLUSTER_NAME \
+            --services az-aware-backend-service-ec2 \
+            --query "services[0].runningCount" \
+            --output text 2>/dev/null || echo "0")
+        
+        echo "Container Instances: $CONTAINER_INSTANCES | FE Tasks: $FE_TASKS | Backend Tasks: $BACKEND_TASKS"
+        
+        if [ "$FE_TASKS" -ge 1 ] && [ "$BACKEND_TASKS" -ge 1 ]; then
+            echo "Cluster is ready!"
+            break
+        fi
+        
+        sleep 5
+    done
+}
+
 start_web_analyzer() {
     ALB_ARN=$(aws elbv2 --region $REGION describe-load-balancers \
         --names $LB_NAME \
@@ -574,6 +606,7 @@ main() {
         "services")
             create_services "$fe_revision" "$backend_revision"
             show_alb_dns
+            check_cluster_status
             start_web_analyzer
             ;;
         "analyzer")
@@ -589,6 +622,7 @@ main() {
             register_task_definitions "$account_id"
             create_services "$FE_REVISION" "$BACKEND_REVISION"
             show_alb_dns
+            check_cluster_status
             start_web_analyzer
             ;;
         *)
