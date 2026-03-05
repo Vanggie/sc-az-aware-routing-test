@@ -85,6 +85,8 @@
         <button id="startBtn" onclick="startTest()">Start Test</button>
         <button id="stopBtn" onclick="stopTest()" disabled>Stop Test</button>
         <button onclick="resetTest()">Reset</button>
+        <label for="tpsInput" style="margin-left: 20px;">TPS:</label>
+        <input type="number" id="tpsInput" value="5" min="1" max="100" style="width: 60px; padding: 5px;">
     </div>
 
     <div class="stats">
@@ -110,6 +112,10 @@
         <canvas id="chart"></canvas>
     </div>
 
+    <div id="latency-chart-container" style="height: 400px; margin-bottom: 10px; margin-top: 30px;">
+        <canvas id="latencyChart"></canvas>
+    </div>
+
     <div class="history-controls">
         <div class="slider-container">
             <span>History:</span>
@@ -128,8 +134,24 @@
         let intervalId = null;
         let startTime = null;
         let chart = null;
+        let latencyChart = null;
         let historySnapshots = [];
         let currentHistoryIndex = -1;
+        
+        // Bin tracking
+        let binStartTime = null;
+        let binTotalRequests = 0;
+        let binMatchedRequests = 0;
+        let binLatencies = [];
+        const BIN_DURATION_MS = 10000; // 10 seconds
+        
+        // Snapshot tracking
+        let lastSnapshotTime = null;
+        const SNAPSHOT_INTERVAL_MS = 600000; // 10 minutes
+        
+        // RPS tracking
+        let sessionStartTime = null;
+        let sessionTotalRequests = 0;
 
         // Initialize chart
         const ctx = document.getElementById('chart').getContext('2d');
@@ -154,13 +176,48 @@
                         max: 100,
                         title: {
                             display: true,
-                            text: 'Percentage (%)'
+                            text: 'Same Zone Traffic Percentage (%)'
                         }
                     },
                     x: {
                         title: {
                             display: true,
-                            text: 'Requests'
+                            text: 'Time'
+                        }
+                    }
+                }
+            }
+        });
+
+        // Initialize latency chart
+        const latencyCtx = document.getElementById('latencyChart').getContext('2d');
+        latencyChart = new Chart(latencyCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Average E2E Latency (ms)',
+                    data: [],
+                    borderColor: 'rgb(255, 99, 132)',
+                    backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                    tension: 0.1
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        title: {
+                            display: true,
+                            text: 'Latency (ms)'
+                        }
+                    },
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Time'
                         }
                     }
                 }
@@ -172,7 +229,7 @@
                 const response = await fetch('/api/', {
                     headers: {
                         'azAwareRouting': 'true',
-                        'dataSize': '100'
+                        'dataSize': '1000'
                     }
                 });
                 
@@ -184,14 +241,21 @@
                 const azId = data.availabilityZoneId;
                 const upstreamAzId = data.upstreamAvailabilityZoneId;
                 const isMatch = azId === upstreamAzId;
+                const serverLatency = parseInt(response.headers.get('X-Server-Latency')) || 0;
 
                 totalRequests++;
+                binTotalRequests++;
+                sessionTotalRequests++;
                 if (isMatch) {
                     matchedRequests++;
+                    binMatchedRequests++;
+                }
+                if (serverLatency > 0) {
+                    binLatencies.push(serverLatency);
                 }
 
                 updateStats();
-                updateChart();
+                checkBinCompletion();
                 logRequest(totalRequests, azId, upstreamAzId, isMatch);
 
             } catch (error) {
@@ -205,6 +269,61 @@
             }
         }
 
+        function checkBinCompletion() {
+            if (!binStartTime) {
+                binStartTime = Date.now();
+                return;
+            }
+            
+            const elapsed = Date.now() - binStartTime;
+            if (elapsed >= BIN_DURATION_MS) {
+                completeBin();
+                binStartTime = Date.now();
+                binTotalRequests = 0;
+                binMatchedRequests = 0;
+                binLatencies = [];
+            }
+        }
+
+        function completeBin() {
+            const percentage = binTotalRequests > 0 ? ((binMatchedRequests / binTotalRequests) * 100).toFixed(2) : 0;
+            const binTime = new Date(binStartTime).toLocaleTimeString();
+            
+            chart.data.labels.push(binTime);
+            chart.data.datasets[0].data.push(percentage);
+
+            // Keep only last 50 bins
+            if (chart.data.labels.length > 50) {
+                chart.data.labels.shift();
+                chart.data.datasets[0].data.shift();
+            }
+
+            chart.update('none');
+            
+            // Calculate average latency for this bin
+            const avgLatency = binLatencies.length > 0 
+                ? (binLatencies.reduce((a, b) => a + b, 0) / binLatencies.length).toFixed(2)
+                : 0;
+            
+            latencyChart.data.labels.push(binTime);
+            latencyChart.data.datasets[0].data.push(avgLatency);
+
+            // Keep only last 50 bins
+            if (latencyChart.data.labels.length > 50) {
+                latencyChart.data.labels.shift();
+                latencyChart.data.datasets[0].data.shift();
+            }
+
+            latencyChart.update('none');
+            
+            // Check if 10 minutes have passed since last snapshot
+            const now = Date.now();
+            if (!lastSnapshotTime || (now - lastSnapshotTime) >= SNAPSHOT_INTERVAL_MS) {
+                saveSnapshot();
+                lastSnapshotTime = now;
+            }
+        }
+
         function updateStats() {
             document.getElementById('totalRequests').textContent = totalRequests;
             document.getElementById('matchedRequests').textContent = matchedRequests;
@@ -212,30 +331,10 @@
             const percentage = totalRequests > 0 ? ((matchedRequests / totalRequests) * 100).toFixed(2) : 0;
             document.getElementById('percentage').textContent = percentage + '%';
 
-            if (startTime) {
-                const elapsed = (Date.now() - startTime) / 1000;
-                const rps = (totalRequests / elapsed).toFixed(2);
+            if (sessionStartTime && isRunning) {
+                const elapsed = (Date.now() - sessionStartTime) / 1000;
+                const rps = (sessionTotalRequests / elapsed).toFixed(2);
                 document.getElementById('requestsPerSec').textContent = rps;
-            }
-        }
-
-        function updateChart() {
-            const percentage = totalRequests > 0 ? ((matchedRequests / totalRequests) * 100).toFixed(2) : 0;
-            
-            chart.data.labels.push(totalRequests);
-            chart.data.datasets[0].data.push(percentage);
-
-            // Keep only last 100 points
-            if (chart.data.labels.length > 100) {
-                chart.data.labels.shift();
-                chart.data.datasets[0].data.shift();
-            }
-
-            chart.update('none');
-            
-            // Save snapshot every 10 requests
-            if (totalRequests % 10 === 0) {
-                saveSnapshot();
             }
         }
 
@@ -306,8 +405,17 @@
             
             isRunning = true;
             startTime = Date.now();
+            binStartTime = Date.now();
+            lastSnapshotTime = Date.now();
+            sessionStartTime = Date.now();
+            sessionTotalRequests = 0;
             document.getElementById('startBtn').disabled = true;
             document.getElementById('stopBtn').disabled = false;
+            document.getElementById('tpsInput').disabled = true;
+
+            // Get TPS from input
+            const tps = parseInt(document.getElementById('tpsInput').value) || 5;
+            const intervalMs = 1000 / tps;
 
             // Make requests continuously
             const makeRequestLoop = () => {
@@ -316,7 +424,7 @@
                 }
             };
             
-            intervalId = setInterval(makeRequestLoop, 200); // 10 requests per second
+            intervalId = setInterval(makeRequestLoop, intervalMs);
         }
 
         function stopTest() {
@@ -327,8 +435,15 @@
                 clearInterval(intervalId);
                 intervalId = null;
             }
+            
+            // Complete the current bin if it has data
+            if (binTotalRequests > 0) {
+                completeBin();
+            }
+            
             document.getElementById('startBtn').disabled = false;
             document.getElementById('stopBtn').disabled = true;
+            document.getElementById('tpsInput').disabled = false;
             
             console.log('Test stopped');
         }
@@ -338,6 +453,13 @@
             totalRequests = 0;
             matchedRequests = 0;
             startTime = null;
+            binStartTime = null;
+            binTotalRequests = 0;
+            binMatchedRequests = 0;
+            binLatencies = [];
+            lastSnapshotTime = null;
+            sessionStartTime = null;
+            sessionTotalRequests = 0;
             historySnapshots = [];
             currentHistoryIndex = -1;
             
@@ -345,7 +467,12 @@
             chart.data.datasets[0].data = [];
             chart.update();
             
+            latencyChart.data.labels = [];
+            latencyChart.data.datasets[0].data = [];
+            latencyChart.update();
+            
             document.getElementById('log').innerHTML = '';
+            document.getElementById('requestsPerSec').textContent = '0';
             updateStats();
             updateHistorySlider();
         }
