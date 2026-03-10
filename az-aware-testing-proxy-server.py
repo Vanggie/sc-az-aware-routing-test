@@ -19,12 +19,18 @@ class ProxyHandler(SimpleHTTPRequestHandler):
             try:
                 start_time = time.time()
                 
+                proxy_headers = {
+                    'azAwareRouting': 'true',
+                    'Connection': 'keep-alive'
+                }
+                custom_name = self.headers.get('X-Custom-Header-Name')
+                custom_value = self.headers.get('X-Custom-Header-Value', '')
+                if custom_name:
+                    proxy_headers[custom_name] = custom_value
+
                 req = urllib.request.Request(
                     f'http://{LB_DNS_NAME}/',
-                    headers={
-                        'azAwareRouting': 'true',
-                        'Connection': 'keep-alive'
-                    }
+                    headers=proxy_headers
                 )
                 with urllib.request.urlopen(req, timeout=5) as response:
                     data = response.read()

@@ -87,6 +87,9 @@
         <button onclick="resetTest()">Reset</button>
         <label for="tpsInput" style="margin-left: 20px;">RPS:</label>
         <input type="number" id="tpsInput" value="5" min="1" max="100" style="width: 60px; padding: 5px;">
+        <span style="margin-left: 20px;">Custom Header:</span>
+        <input type="text" id="headerName" placeholder="Header name" style="width: 140px; padding: 5px; margin-left: 5px;">
+        <input type="text" id="headerValue" placeholder="Value" style="width: 140px; padding: 5px; margin-left: 5px;">
     </div>
 
     <div class="stats">
@@ -226,12 +229,17 @@
 
         async function makeRequest() {
             try {
-                const response = await fetch('/api/', {
-                    headers: {
-                        'azAwareRouting': 'true',
-                        'dataSize': '1000'
-                    }
-                });
+                const headers = {
+                    'azAwareRouting': 'true',
+                    'dataSize': '1000'
+                };
+                const customName = document.getElementById('headerName').value.trim();
+                const customValue = document.getElementById('headerValue').value.trim();
+                if (customName) {
+                    headers['X-Custom-Header-Name'] = customName;
+                    headers['X-Custom-Header-Value'] = customValue;
+                }
+                const response = await fetch('/api/', { headers });
                 
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -412,6 +420,8 @@
             document.getElementById('startBtn').disabled = true;
             document.getElementById('stopBtn').disabled = false;
             document.getElementById('tpsInput').disabled = true;
+            document.getElementById('headerName').disabled = true;
+            document.getElementById('headerValue').disabled = true;
 
             // Get TPS from input
             const tps = parseInt(document.getElementById('tpsInput').value) || 5;
@@ -444,6 +454,8 @@
             document.getElementById('startBtn').disabled = false;
             document.getElementById('stopBtn').disabled = true;
             document.getElementById('tpsInput').disabled = false;
+            document.getElementById('headerName').disabled = false;
+            document.getElementById('headerValue').disabled = false;
             
             console.log('Test stopped');
         }
